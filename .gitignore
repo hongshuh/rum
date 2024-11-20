@@ -175,3 +175,7 @@ cython_debug/
 *dataset*
 *.stdout
 core.*
+
+
+log
+wandb
