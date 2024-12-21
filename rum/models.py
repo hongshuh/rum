@@ -2,9 +2,38 @@ from re import sub
 from typing import Callable
 import torch
 import dgl
-from dgl.nn import GlobalAttentionPooling
+from dgl.nn.pytorch.glob import GlobalAttentionPooling
 from .layers import RUMLayer, Consistency
+from .utils import feat_nn,gate_nn
 
+class WeightedAttentionWalk(torch.nn.Module):
+    """
+    Weighted softmax attention layer
+    """
+
+    def __init__(self, gate_nn, feat_nn):
+        """
+        Inputs
+        ----------
+        gate_nn: Variable(nn.Module)
+        """
+        super().__init__()
+        self.gate_nn = gate_nn
+        self.feat_nn = feat_nn
+        self.pow = torch.nn.Parameter(torch.randn(1))
+
+    def forward(self, x, index, weights):
+        gate = self.gate_nn(x)
+
+       
+
+        x = self.feat_nn(x)
+        
+
+        return x
+    def __repr__(self):
+        return self.__class__.__name__
+    
 class RUMModel(torch.nn.Module):
     def __init__(
             self,
@@ -64,7 +93,9 @@ class RUMGraphRegressionModel(RUMModel):
             torch.nn.Dropout(kwargs["dropout"]),
             torch.nn.Linear(self.hidden_features, self.out_features),
         )
-
+        self.attn_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
+        self.attn_gate = gate_nn(self.hidden_features, self.hidden_features)
+        self.attn_pool = GlobalAttentionPooling(gate_nn=self.attn_gate,feat_nn=self.attn_feat)
 
     def forward(self, g, h, e=None, subsample=None):
         g = g.local_var()
@@ -79,9 +110,21 @@ class RUMGraphRegressionModel(RUMModel):
             h, _loss = layer(g, h, h0, e=e, subsample=subsample)
             loss = loss + self.self_supervise_weight * _loss
         # h = self.activation(h)
-        h = h.mean(0)
-        g.ndata["h"] = h
+        # print(h.shape)
+
+        ## pooling the random walks
+        h = h.mean(0) ##TODO : Replace with attention pooling
+        
+        # print(h.shape)
+        # g.ndata["h"] = h
         # h = dgl.sum_nodes(g, "h")
-        h = dgl.mean_nodes(g, "h")
+        ## pooling the graph
+        # h = dgl.mean_nodes(g, "h") ##TODO : Replace with attention pooling
+
+        # print(h.shape)
+        h = self.attn_pool(g,h)
+        ## output head
         h = self.fc_out(h)
+        # print(h.shape)
+        
         return h, loss
