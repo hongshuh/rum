@@ -6,9 +6,9 @@ from dgl.nn.pytorch.glob import GlobalAttentionPooling
 from .layers import RUMLayer, Consistency
 from .utils import feat_nn,gate_nn
 
-class WeightedAttentionWalk(torch.nn.Module):
+class AttentionWalk(torch.nn.Module):
     """
-    Weighted softmax attention layer
+    softmax attention layer
     """
 
     def __init__(self, gate_nn, feat_nn):
@@ -20,17 +20,13 @@ class WeightedAttentionWalk(torch.nn.Module):
         super().__init__()
         self.gate_nn = gate_nn
         self.feat_nn = feat_nn
-        self.pow = torch.nn.Parameter(torch.randn(1))
 
-    def forward(self, x, index, weights):
-        gate = self.gate_nn(x)
-
-       
-
-        x = self.feat_nn(x)
-        
-
-        return x
+    def forward(self, h):
+        gate = self.gate_nn(h)
+        feat = self.feat_nn(h)
+        gate = torch.nn.functional.softmax(gate, dim=0)
+        h = torch.sum(gate * feat, dim=0)
+        return h
     def __repr__(self):
         return self.__class__.__name__
     
@@ -93,10 +89,15 @@ class RUMGraphRegressionModel(RUMModel):
             torch.nn.Dropout(kwargs["dropout"]),
             torch.nn.Linear(self.hidden_features, self.out_features),
         )
+        ## Graph Attention Pooling
         self.attn_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
         self.attn_gate = gate_nn(self.hidden_features, self.hidden_features)
         self.attn_pool = GlobalAttentionPooling(gate_nn=self.attn_gate,feat_nn=self.attn_feat)
 
+        ## Random Walk Attention
+        self.walk_gate = gate_nn(self.hidden_features, self.hidden_features)
+        self.walk_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
+        self.walk_pool = AttentionWalk(gate_nn=self.walk_gate,feat_nn=self.walk_feat)
     def forward(self, g, h, e=None, subsample=None):
         g = g.local_var()
         h0 = h
@@ -106,6 +107,7 @@ class RUMGraphRegressionModel(RUMModel):
             if idx > 0:
                 # h = torch.nn.functional.tanh(h)
                 h = torch.nn.SiLU()(h)
+                ##TODO might want to change into attention aggregation and add skip connections
                 h = h.mean(0)
             h, _loss = layer(g, h, h0, e=e, subsample=subsample)
             loss = loss + self.self_supervise_weight * _loss
@@ -113,18 +115,15 @@ class RUMGraphRegressionModel(RUMModel):
         # print(h.shape)
 
         ## pooling the random walks
-        h = h.mean(0) ##TODO : Replace with attention pooling
-        
-        # print(h.shape)
-        # g.ndata["h"] = h
-        # h = dgl.sum_nodes(g, "h")
-        ## pooling the graph
-        # h = dgl.mean_nodes(g, "h") ##TODO : Replace with attention pooling
+        #h = h.mean(0) # mean pooling
+        h = self.walk_pool(h) # attention pooling
 
-        # print(h.shape)
-        h = self.attn_pool(g,h)
+        ## pooling node into garph
+        # g.ndata["h"] = h
+        # h = dgl.sum_nodes(g, "h") # sum pooling
+        # h = dgl.mean_nodes(g, "h") # mean pooling
+        h = self.attn_pool(g,h) # attention pooling
+
         ## output head
         h = self.fc_out(h)
-        # print(h.shape)
-        
         return h, loss

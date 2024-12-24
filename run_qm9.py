@@ -1,10 +1,12 @@
 import numpy as np
+from sqlalchemy import all_
 import torch
 import dgl
 import math
 from rum.data import qm9
 from rum.utils import Normalizer
 from transformers import get_cosine_schedule_with_warmup
+from accelerate import Accelerator
 # from ogb.nodeproppred import DglNodePropPredDataset
 dgl.use_libxsmm(False)
 
@@ -22,31 +24,44 @@ def get_graphs(label='gap',debug=False):
 
 
 def run(args):
+    accelerator = Accelerator(log_with="wandb")
+    device = accelerator.device
     train_set, valid_set, test_set = get_graphs(args.label)
 
     normalizer = None
     if args.normalize_label == True:
         train_label = torch.tensor(train_set.df[train_set.label].values,dtype=torch.float32,requires_grad=False)
         normalizer = Normalizer(train_label)
-        print(normalizer.mean, normalizer.std,train_label.shape)
+        accelerator.print("Normalizing label, mean and std are",normalizer.mean, normalizer.std)
+        accelerator.print("Train label shape",train_label.shape)
 
     data_train = dgl.dataloading.GraphDataLoader(
         train_set, batch_size=args.batch_size, shuffle=True, drop_last=True
     )
 
     data_valid = dgl.dataloading.GraphDataLoader(
-        valid_set, batch_size=args.batch_size,
+        valid_set, batch_size=2*args.batch_size,
     )
 
     data_test = dgl.dataloading.GraphDataLoader(
-        test_set, batch_size=args.batch_size,
+        test_set, batch_size=2*args.batch_size,
     )
 
     g, y = next(iter(data_train))
     
     ## Wandb Init
     import wandb
-    wandb.init(project=f"RUM_{args.data}", config=args)
+    from datetime import datetime
+
+    # Get current date and time
+    now = datetime.now()
+
+    # Format date and time to a string (e.g., "2024-12-21_14-30-45")
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Print or use the timestamp as a folder name
+    accelerator.print(timestamp)
+    accelerator.init_trackers(project_name=f"RUM_{args.data}_{args.label}", config=args,init_kwargs={"wandb": {"group": f"{timestamp}"}})
 
     from rum.models import RUMGraphRegressionModel
     model = RUMGraphRegressionModel(
@@ -65,10 +80,12 @@ def run(args):
         edge_features=g.edata["e0"].shape[-1],
     )
     model = model.float()
-    # model = torch.compile(model)
 
-    if torch.cuda.is_available():
-        model = model.cuda()
+    ## Count number of parameters in Million
+    total_params = sum(p.numel() for p in model.parameters())
+    accelerator.print(f"Number of parameters : {np.round(total_params/1e6,1)} M")
+
+    model = model.to(device)
     
 
     
@@ -92,42 +109,23 @@ def run(args):
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
                                                         num_training_steps=training_steps)
     
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    data_train, data_valid, data_test = accelerator.prepare(data_train, data_valid, data_test)
+
     from rum.utils import EarlyStopping
     early_stopping = EarlyStopping(patience=args.patience)
 
-    # Dummy validation
-    mae_vl, mae_te = 0.0, 0.0
-    with torch.no_grad():
-        model.eval()
-        for g, y in data_valid:
-            if torch.cuda.is_available():
-                g = g.to("cuda")
-                y = y.to("cuda")
-            h_vl, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
-            if normalizer is not None:
-                h_vl = normalizer.denorm(h_vl)
-            mae_vl += torch.nn.functional.l1_loss(h_vl.squeeze(), y,reduction='sum').item()
-        mae_vl = mae_vl/len(valid_set)
-        for g, y in data_test:
-            if torch.cuda.is_available():
-                g = g.to("cuda")
-                y = y.to("cuda")
-            h_te, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
-            if normalizer is not None:
-                h_te = normalizer.denorm(h_te)
-            mae_te += torch.nn.functional.l1_loss(h_te.squeeze(), y,reduction='sum').item()
-        mae_te = mae_te/len(test_set)
-            
+    # Dummy MAE
+    mean_train = train_set.df[args.label].mean()
+    mae_vl = valid_set.df[args.label].apply(lambda x: abs(x - mean_train)).mean()
+    mae_te = test_set.df[args.label].apply(lambda x: abs(x - mean_train)).mean()
     mae_vl_min = mae_vl
     mae_te_min = mae_te
-    print(f'Dummy MAE on validation and test set : {mae_vl_min}, {mae_te_min}')
+    accelerator.print(f'Dummy MAE on validation and test set : {mae_vl_min}, {mae_te_min}')
     
     for idx in range(args.n_epochs):
         for g, y in data_train:
             model.train()
-            if torch.cuda.is_available():
-                g = g.to("cuda")
-                y = y.to("cuda")
             optimizer.zero_grad()
             h, loss = model(g, g.ndata["h0"], e=g.edata["e0"])
             
@@ -137,54 +135,62 @@ def run(args):
             mae = torch.nn.functional.l1_loss(h.squeeze(), y)
             loss = loss + mae
             
-            loss.backward()
+            # loss.backward()
+            accelerator.backward(loss)
             
             # logging loss to wandb
-            wandb.log({"train loss": loss.item()})
+            accelerator.log({"train loss": loss.item()})
             # wandb.log({"train MAE": mae.item()})
-            
-
+    
             optimizer.step()
             scheduler.step()
 
         with torch.no_grad():
             model.eval()
-            mae_vl = 0.0
+            all_preds = []
+            all_targets = []
             for g, y in data_valid:
-                if torch.cuda.is_available():
-                    g = g.to("cuda")
-                    y = y.to("cuda")
                 h_vl, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
                 if normalizer:
                     h_vl = normalizer.denorm(h_vl)
-                mae_vl += torch.nn.functional.l1_loss(h_vl.squeeze(), y,reduction='sum').item()
-            mae_vl = mae_vl/len(valid_set)
-            wandb.log({"MAE_validation": mae_vl})
+                pred,target = accelerator.gather_for_metrics((h_vl.squeeze(),y))
+            #cat the predictions
+                all_preds.append(pred)
+                all_targets.append(target)
+            all_preds = torch.cat(all_preds)
+            all_targets = torch.cat(all_targets)
+            accelerator.print('shape of all pred = ',all_preds.size())
+            mae_vl = torch.nn.functional.l1_loss(all_preds,all_targets).item()
+            accelerator.log({"MAE_validation": mae_vl})
             if early_stopping([mae_vl]) and idx > 200:
                 # print("Early stopping at epoch :", idx)
                 break
 
-            mae_te = 0.0
             for g, y in data_test:
-                if torch.cuda.is_available():
-                    g = g.to("cuda")
-                    y = y.to("cuda")
+                all_preds = []
+                all_targets = []
                 h_te, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
                 if normalizer:
                     h_te = normalizer.denorm(h_te)
-                mae_te += torch.nn.functional.l1_loss(h_te.squeeze(), y,reduction='sum').item()
-            ## Average the RMSE
-            mae_te =mae_te/len(test_set)
-            wandb.log({"MAE_test": mae_te})
+                pred,target = accelerator.gather_for_metrics((h_te.squeeze(),y))
+                all_preds.append(pred)
+                all_targets.append(target)
+            all_preds = torch.cat(all_preds)
+            all_targets = torch.cat(all_targets)
+            accelerator.print('shape of all pred = ',all_preds.size())
+            mae_te = torch.nn.functional.l1_loss(all_preds,all_targets).item()
+            accelerator.log({"MAE_test": mae_te})
 
             # print(rmse_vl, rmse_te)
-            if mae_te < mae_te_min:
+            if mae_vl < mae_vl_min:
                 mae_te_min = mae_te
                 mae_vl_min = mae_vl
-    wandb.log({"Final_MAE_validation": mae_vl_min})
-    wandb.log({"Final_MAE_test": mae_te_min})
+        
+    accelerator.log({"Final_MAE_validation": mae_vl_min})
+    accelerator.log({"Final_MAE_test": mae_te_min})
+    accelerator.end_training()
     # Used for hyperparameter optimization, do not change the "RMSE" string
-    print('MAE',mae_vl_min, mae_te_min, flush=True)
+    accelerator.print('MAE',mae_vl_min, mae_te_min, flush=True)
     return mae_vl_min, mae_te_min
 
 if __name__ == "__main__":
@@ -192,6 +198,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="qm9")
     parser.add_argument("--label", type=str, default="gap")
+    parser.add_argument("--multi_gpu", type=bool, default=True)
     parser.add_argument("--normalize_label", type=bool, default=True)
     parser.add_argument("--hidden_features", type=int, default=16)
     parser.add_argument("--depth", type=int, default=1)
