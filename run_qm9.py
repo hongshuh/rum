@@ -1,3 +1,5 @@
+import os
+from tabnanny import check
 import numpy as np
 from sqlalchemy import all_
 import torch
@@ -9,7 +11,6 @@ from transformers import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 # from ogb.nodeproppred import DglNodePropPredDataset
 dgl.use_libxsmm(False)
-
 def get_graphs(label='gap',debug=False):
     if debug:
         train_set = qm9('small_train',label)
@@ -24,10 +25,28 @@ def get_graphs(label='gap',debug=False):
 
 
 def run(args):
-    accelerator = Accelerator(log_with="wandb")
+    import yaml
+    args_dict = vars(args)
+    with open(f'./checkpoint/{args.data}/{args.label}/config.yaml', 'w') as file:
+        yaml.dump(args_dict, file)
+    from datetime import datetime
+
+    if args.checkpoint:
+        tmp_dir = args.checkpoint
+    else:
+        # Get current date and time
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+        tmp_dir = f'./checkpoint/{args.data}/{args.label}/{timestamp}'
+        os.makedirs(tmp_dir,exist_ok=True)
+
+    accelerator = Accelerator(log_with="wandb",project_dir=tmp_dir)
     device = accelerator.device
     train_set, valid_set, test_set = get_graphs(args.label)
-
+    accelerator.print("Train set size", len(train_set))
+    accelerator.print("Valid set size", len(valid_set))
+    accelerator.print("Test set size", len(test_set))
+    
     normalizer = None
     if args.normalize_label == True:
         train_label = torch.tensor(train_set.df[train_set.label].values,dtype=torch.float32,requires_grad=False)
@@ -49,19 +68,7 @@ def run(args):
 
     g, y = next(iter(data_train))
     
-    ## Wandb Init
-    import wandb
-    from datetime import datetime
 
-    # Get current date and time
-    now = datetime.now()
-
-    # Format date and time to a string (e.g., "2024-12-21_14-30-45")
-    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Print or use the timestamp as a folder name
-    accelerator.print(timestamp)
-    accelerator.init_trackers(project_name=f"RUM_{args.data}_{args.label}", config=args,init_kwargs={"wandb": {"group": f"{timestamp}"}})
 
     from rum.models import RUMGraphRegressionModel
     model = RUMGraphRegressionModel(
@@ -82,9 +89,10 @@ def run(args):
     model = model.float()
 
     ## Count number of parameters in Million
+    accelerator.init_trackers(project_name=f"RUM_{args.data}_{args.label}", config=args)
     total_params = sum(p.numel() for p in model.parameters())
     accelerator.print(f"Number of parameters : {np.round(total_params/1e6,1)} M")
-
+    ## Load checkpoint
     model = model.to(device)
     
 
@@ -123,6 +131,18 @@ def run(args):
     mae_te_min = mae_te
     accelerator.print(f'Dummy MAE on validation and test set : {mae_vl_min}, {mae_te_min}')
     
+################## Checkpointing ##################
+    if args.checkpoint:
+        accelerator.print("Loading checkpoint")
+        try:
+            accelerator.load_state(f"{tmp_dir}")
+            accelerator.print("Loading checkpoint successful")
+        except:
+            accelerator.print("Loading checkpoint failed")
+    else:
+        accelerator.print("Train from scratch")
+        accelerator.save_state(f"{tmp_dir}/last",safe_serialization=False)
+################## Training ##################
     for idx in range(args.n_epochs):
         for g, y in data_train:
             model.train()
@@ -159,16 +179,18 @@ def run(args):
                 all_targets.append(target)
             all_preds = torch.cat(all_preds)
             all_targets = torch.cat(all_targets)
-            accelerator.print('shape of all pred = ',all_preds.size())
+            if idx == 0:
+                accelerator.print('shape of all pred in valid:',all_preds.size())
             mae_vl = torch.nn.functional.l1_loss(all_preds,all_targets).item()
             accelerator.log({"MAE_validation": mae_vl})
             if early_stopping([mae_vl]) and idx > 200:
                 # print("Early stopping at epoch :", idx)
                 break
+            
 
+            all_preds = []
+            all_targets = []
             for g, y in data_test:
-                all_preds = []
-                all_targets = []
                 h_te, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
                 if normalizer:
                     h_te = normalizer.denorm(h_te)
@@ -177,7 +199,8 @@ def run(args):
                 all_targets.append(target)
             all_preds = torch.cat(all_preds)
             all_targets = torch.cat(all_targets)
-            accelerator.print('shape of all pred = ',all_preds.size())
+            if idx == 0:
+                accelerator.print('shape of all pred in test :',all_preds.size())
             mae_te = torch.nn.functional.l1_loss(all_preds,all_targets).item()
             accelerator.log({"MAE_test": mae_te})
 
@@ -185,13 +208,18 @@ def run(args):
             if mae_vl < mae_vl_min:
                 mae_te_min = mae_te
                 mae_vl_min = mae_vl
-        
+                accelerator.wait_for_everyone()
+                accelerator.save_state(f"{tmp_dir}/best",safe_serialization=False)
+        accelerator.wait_for_everyone()
+        accelerator.save_state(f"{tmp_dir}/last",safe_serialization=False)
+        accelerator.print(f"Epoch {idx} : MAE validation {mae_vl}, MAE test {mae_te}")
     accelerator.log({"Final_MAE_validation": mae_vl_min})
     accelerator.log({"Final_MAE_test": mae_te_min})
     accelerator.end_training()
     # Used for hyperparameter optimization, do not change the "RMSE" string
     accelerator.print('MAE',mae_vl_min, mae_te_min, flush=True)
     return mae_vl_min, mae_te_min
+
 
 if __name__ == "__main__":
     import argparse
