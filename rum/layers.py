@@ -102,6 +102,7 @@ class RUMLayer(torch.nn.Module):
             h = torch.cat([h, y_walk], dim=-1)
         # h = self.fc(h)
         # h = self.activation(h)
+        ##TODO better way to handle edge features
         if e is not None:
             _h = torch.empty(
                 *h.shape[:-2],

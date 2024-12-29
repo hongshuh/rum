@@ -6,26 +6,52 @@ from dgl.nn.pytorch.glob import GlobalAttentionPooling
 from .layers import RUMLayer, Consistency
 from .utils import feat_nn,gate_nn
 
+class Multi_Head_Attention(torch.nn.Module):
+    def __init__(self,hidden,heads,gate,feat):
+        super().__init__()
+        assert hidden % heads == 0, "Input dimension must be divisible by the number of heads."
+        self.heads = heads
+        self.hidden = hidden
+        self.gate = gate
+        self.feat = feat
+        self.attn_drop = torch.nn.Dropout(0.1)
+    def forward(self,h):
+        N,BN,D = h.shape # N: number of random walks, BN: batch size * number of nodes, D: hidden dimension
+        f = self.feat(h)
+        g = self.gate(h)
+        f = f.view(N,BN,self.heads,D//self.heads)
+        g = g.view(N,BN,self.heads,1)
+        # Apply softmax over the gating scores for each head
+        g_softmax = torch.nn.functional.softmax(g, dim=0)  # Shape: (N, BN, heads)
+        g_softmax = self.attn_drop(g_softmax)
+        # Compute weighted sum for each head
+        h_heads = torch.sum(g_softmax * f,dim=0)  # Shape: (BN, heads, D//heads)
+        # Concatenate the outputs of all heads
+        h_out = h_heads.view(BN, self.hidden)  # Shape: (BN, D)
+        return h_out
 class AttentionWalk(torch.nn.Module):
     """
     softmax attention layer
     """
 
-    def __init__(self, gate_nn, feat_nn):
+    def __init__(self, gate, feat):
         """
         Inputs
         ----------
         gate_nn: Variable(nn.Module)
         """
         super().__init__()
-        self.gate_nn = gate_nn
-        self.feat_nn = feat_nn
+        self.gate = gate
+        self.feat = feat
 
     def forward(self, h):
-        gate = self.gate_nn(h)
-        feat = self.feat_nn(h)
-        gate = torch.nn.functional.softmax(gate, dim=0)
-        h = torch.sum(gate * feat, dim=0)
+        print(h.shape)
+        g = self.gate(h)
+        print(g.shape)
+        f = self.feat(h)
+        g_softmax = torch.nn.functional.softmax(g, dim=0)
+        h = torch.sum(g_softmax * f, dim=0)
+        exit()
         return h
     def __repr__(self):
         return self.__class__.__name__
@@ -89,15 +115,23 @@ class RUMGraphRegressionModel(RUMModel):
             torch.nn.Dropout(kwargs["dropout"]),
             torch.nn.Linear(self.hidden_features, self.out_features),
         )
+        self.LayerNorm = torch.nn.LayerNorm(self.hidden_features)
+        self.heads = 8
+
         ## Graph Attention Pooling
         self.attn_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
-        self.attn_gate = gate_nn(self.hidden_features, self.hidden_features)
+        self.attn_gate = gate_nn(self.hidden_features, self.hidden_features, 1)
         self.attn_pool = GlobalAttentionPooling(gate_nn=self.attn_gate,feat_nn=self.attn_feat)
 
         ## Random Walk Attention
-        self.walk_gate = gate_nn(self.hidden_features, self.hidden_features)
+        # self.walk_gate = gate_nn(self.hidden_features, self.hidden_features, 1)
+        # self.walk_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
+        # self.walk_pool = AttentionWalk(gate=self.walk_gate,feat=self.walk_feat)
+
+        ## Multi Head Attention
+        self.walk_gate = gate_nn(self.hidden_features, self.hidden_features, self.heads)
         self.walk_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
-        self.walk_pool = AttentionWalk(gate_nn=self.walk_gate,feat_nn=self.walk_feat)
+        self.walk_pool = Multi_Head_Attention(self.hidden_features,self.heads,gate=self.walk_gate,feat=self.walk_feat)
     def forward(self, g, h, e=None, subsample=None):
         g = g.local_var()
         h0 = h
@@ -113,7 +147,7 @@ class RUMGraphRegressionModel(RUMModel):
             loss = loss + self.self_supervise_weight * _loss
         # h = self.activation(h)
         # print(h.shape)
-
+        h = self.LayerNorm(h)
         ## pooling the random walks
         #h = h.mean(0) # mean pooling
         h = self.walk_pool(h) # attention pooling

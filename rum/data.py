@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from dgl.data import DGLDataset
 from dgllife.utils import (
@@ -15,8 +16,29 @@ class qm9(DGLDataset):
                  ,label):
         super().__init__(name="qm9")
         self.path = '/nfs/turbo/coe-venkvis/hongshuh/rum/dataset/data/qm9'
-        self.df = pd.read_csv(f'{self.path}/qm9_{dataset}.csv')
+        # Load the npz file into memory as a dictionary
+        with np.load(f'{self.path}/qm9_{dataset}.npz', allow_pickle=True) as data:
+            self.df = {key: data[key] for key in data.files}
         self.label = label
+    def __len__(self):
+        return len(self.df['smiles'])
+    def __getitem__(self, idx):
+        smiles = self.df['smiles'][idx]
+        ##TODO : Need better featurizer
+        g = smiles_to_bigraph(smiles, node_featurizer=CanonicalAtomFeaturizer("h0"), edge_featurizer=CanonicalBondFeaturizer("e0"))
+        y = np.array([self.df[l][idx] for l in self.label]).T
+        ## Convert 
+        y = torch.tensor(y).float()
+        return g, y
+    
+class qm9_xyz(DGLDataset):
+    def __init__(self,dataset
+                 ,label):
+        super().__init__(name="qm9_xyz")
+        self.path = f'/nfs/turbo/coe-venkvis/hongshuh/rum/dataset/qm9_xyz'
+        self.df = pd.read_csv(f'/nfs/turbo/coe-venkvis/hongshuh/rum/dataset/data/qm9/qm9.csv')
+        self.label = label
+        
     def __len__(self):
         return len(self.df)
     def __getitem__(self, idx):
@@ -26,18 +48,11 @@ class qm9(DGLDataset):
 
         ## Convert 
         return g, y
-
 if __name__ == "__main__":
-    from utils import Normalizer
-    train_set = qm9('train','gap')
-    train_loader = GraphDataLoader(train_set, batch_size=32, shuffle=True, drop_last=True)
-    # for g, y in train_loader:
-    #     print(g)
-    #     print(y)
-    #     print(y.dtype)
-    #     break
-    train_label = torch.tensor(train_set.df[train_set.label].values,dtype=torch.float32,requires_grad=False)
-    normalizer = Normalizer(train_label)
-    print(normalizer.mean, normalizer.std,train_label.shape)
+    label = ['mu','alpha','homo','lumo','gap','r2','zpve','u0','u298','h298','g298','cv']
+    label = ['gap']
+    dataset = qm9('small_train',label)
+    
+
     
         

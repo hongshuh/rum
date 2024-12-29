@@ -10,14 +10,14 @@ class Normalizer(object):
 
     def __init__(self, tensor):
         """tensor is taken as a sample to calculate the mean and std"""
-        self.mean = torch.mean(tensor)
-        self.std = torch.std(tensor)
+        self.mean = torch.mean(tensor,0)
+        self.std = torch.std(tensor,0)
 
     def norm(self, tensor):
-        return (tensor - self.mean) / self.std
+        return (tensor - self.mean.to(tensor.device)) / self.std.to(tensor.device)
 
     def denorm(self, normed_tensor):
-        return normed_tensor * self.std + self.mean
+        return normed_tensor * self.std.to(normed_tensor.device) + self.mean.to(normed_tensor.device)
 
     def state_dict(self):
         return {'mean': self.mean,
@@ -74,11 +74,11 @@ class gate_nn(nn.Module):
     '''
     Gate function for the attention pooling layer
     '''
-    def __init__(self, in_features: int,hidden_features: int,activation: Callable = nn.LeakyReLU()):
+    def __init__(self, in_features: int,hidden_features: int,out_dim:int,activation: Callable = nn.LeakyReLU()):
         super().__init__()
         self.fc = nn.Linear(in_features, hidden_features)
         self.act = activation
-        self.out = nn.Linear(hidden_features, 1)
+        self.out = nn.Linear(hidden_features, out_dim)
     
     def forward(self, x):
         x = self.fc(x)
