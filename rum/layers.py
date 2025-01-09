@@ -1,7 +1,7 @@
 import math
 import torch
 import dgl
-from .random_walk import uniform_random_walk, uniqueness
+from .random_walk import uniform_random_walk, uniqueness, node2vec_random_walk
 from .rnn import GRU
 
 class RUMLayer(torch.nn.Module):
@@ -44,7 +44,7 @@ class RUMLayer(torch.nn.Module):
         self.directed = directed
         self.degrees = degrees
 
-    def forward(self, g, h, y0, e=None, subsample=None):
+    def forward(self, g, h, y0, e=None, subsample=None,walks=None,eids=None):
         """Forward pass.
 
         Parameters
@@ -61,11 +61,13 @@ class RUMLayer(torch.nn.Module):
             The output features.
         """
         walks, eids = self.random_walk(
-            g=g, 
-            num_samples=self.num_samples, 
-            length=self.length,
-            subsample=subsample,
-        )
+                    g=g, 
+                    num_samples=self.num_samples, 
+                    length=self.length,
+                    subsample=subsample
+                )
+        
+        
         if self.directed:
             walks = torch.where(
                 walks == -1,

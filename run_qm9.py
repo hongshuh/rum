@@ -5,21 +5,21 @@ from sqlalchemy import all_
 import torch
 import dgl
 import math
-from rum.data import qm9
+from rum.data import qm9,collate
 from rum.utils import Normalizer
 from transformers import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 # from ogb.nodeproppred import DglNodePropPredDataset
 dgl.use_libxsmm(False)
-def get_graphs(label,debug=False):
+def get_graphs(args,debug=False):
     if debug:
-        train_set = qm9('small_train',label)
-        valid_set = qm9('small_valid',label)
-        test_set = qm9('small_test',label)
+        train_set = qm9('small_train',args)
+        valid_set = qm9('small_valid',args)
+        test_set = qm9('small_test',args)
     else:
-        train_set = qm9('train',label)
-        valid_set = qm9('valid',label)
-        test_set = qm9('test',label)
+        train_set = qm9('train',args)
+        valid_set = qm9('valid',args)
+        test_set = qm9('test',args)
 
     return train_set, valid_set, test_set
 
@@ -44,7 +44,7 @@ def run(args):
         args.label = ['mu','alpha','homo','lumo','gap','r2','zpve','u0','u298','h298','g298','cv']
     else:
         args.label = args.label.split(',')
-    train_set, valid_set, test_set = get_graphs(args.label,args.debug)
+    train_set, valid_set, test_set = get_graphs(args,args.debug)
     accelerator.print("Train set size", len(train_set))
     accelerator.print("Valid set size", len(valid_set))
     accelerator.print("Test set size", len(test_set))
@@ -57,18 +57,18 @@ def run(args):
         accelerator.print("Train label shape",train_label.shape)
     
     data_train = dgl.dataloading.GraphDataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,num_workers=32
+        train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,num_workers=32, collate_fn=collate
     )
 
     data_valid = dgl.dataloading.GraphDataLoader(
-        valid_set, batch_size=2*args.batch_size,num_workers=32
+        valid_set, batch_size=2*args.batch_size,num_workers=32, collate_fn=collate
     )
 
     data_test = dgl.dataloading.GraphDataLoader(
-        test_set, batch_size=2*args.batch_size,num_workers=32
+        test_set, batch_size=2*args.batch_size,num_workers=32, collate_fn=collate
     )
 
-    g, y = next(iter(data_train))
+    g, y ,walks,eids = next(iter(data_train))
     
 
 
@@ -144,10 +144,10 @@ def run(args):
 ################## Training ##################
     for idx in range(args.n_epochs):
         model.train()
-        for g, y in data_train:
+        for g, y ,walks,eids in data_train:
             optimizer.zero_grad()
             ## Forward
-            h, loss = model(g, g.ndata["h0"], e=g.edata["e0"])
+            h, loss = model(g, g.ndata["h0"], e=g.edata["e0"],walks=walks,eids=eids)
             if normalizer:
                 y = normalizer.norm(y)
             mae = torch.nn.functional.l1_loss(h, y)
@@ -164,8 +164,8 @@ def run(args):
             model.eval()
             all_preds = []
             all_targets = []
-            for g, y in data_valid:
-                h_vl, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
+            for g, y, walks, eids in data_valid:
+                h_vl, _ = model(g, g.ndata["h0"], e=g.edata["e0"],walks=walks,eids=eids)
                 if normalizer:
                     h_vl = normalizer.denorm(h_vl)
                 pred,target = accelerator.gather_for_metrics((h_vl,y))
@@ -182,8 +182,8 @@ def run(args):
       
             all_preds = []
             all_targets = []
-            for g, y in data_test:
-                h_te, _ = model(g, g.ndata["h0"], e=g.edata["e0"])
+            for g, y, walks, eids in data_test:
+                h_te, _ = model(g, g.ndata["h0"], e=g.edata["e0"],walks=walks,eids=eids)
                 if normalizer:
                     h_te = normalizer.denorm(h_te)
                 pred,target = accelerator.gather_for_metrics((h_te,y))
@@ -202,10 +202,11 @@ def run(args):
                 mae_vl_min = torch.mean(mae_vl)
                 accelerator.wait_for_everyone()
                 accelerator.save_state(f"{tmp_dir}/best",safe_serialization=False)
-                accelerator.print(f"Epoch {idx} : MAE validation {mae_vl}, MAE test {mae_te}")
+                for i,key in enumerate(args.label):
+                    accelerator.log({f"Final_MAE_test_{key}": mae_te[i]})
         accelerator.wait_for_everyone()
         accelerator.save_state(f"{tmp_dir}/last",safe_serialization=False)
-        accelerator.print(f"Epoch {idx} : MAE validation {mae_vl}, MAE test {mae_te}")
+        accelerator.print(f"Epoch {idx} : MAE validation {torch.mean(mae_vl)}, MAE test {torch.mean(mae_te)}")
 
     accelerator.end_training()
     accelerator.print('MAE',mae_vl_min, mae_te_min, flush=True)
@@ -217,11 +218,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="qm9")
     parser.add_argument("--label", type=str, default="gap")
-    parser.add_argument("--debug", type=bool, default="False")
+    parser.add_argument("--debug", type=bool, default=False)
     parser.add_argument("--multi_gpu", type=bool, default=True)
     parser.add_argument("--normalize_label", type=bool, default=True)
     parser.add_argument("--hidden_features", type=int, default=16)
     parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--mode", type=str, default='Random')
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--length", type=int, default=7)
     parser.add_argument("--optimizer", type=str, default="AdEMAMix")

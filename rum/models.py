@@ -132,7 +132,7 @@ class RUMGraphRegressionModel(RUMModel):
         self.walk_gate = gate_nn(self.hidden_features, self.hidden_features, self.heads)
         self.walk_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)
         self.walk_pool = Multi_Head_Attention(self.hidden_features,self.heads,gate=self.walk_gate,feat=self.walk_feat)
-    def forward(self, g, h, e=None, subsample=None):
+    def forward(self, g, h,e=None, subsample=None,walks=None,eids=None):
         g = g.local_var()
         h0 = h
         h = self.fc_in(h)
@@ -143,7 +143,7 @@ class RUMGraphRegressionModel(RUMModel):
                 h = torch.nn.SiLU()(h)
                 ##TODO might want to change into attention aggregation and add skip connections
                 h = h.mean(0)
-            h, _loss = layer(g, h, h0, e=e, subsample=subsample)
+            h, _loss = layer(g, h, h0, e=e, subsample=subsample,walks=walks,eids=eids)
             loss = loss + self.self_supervise_weight * _loss
         # h = self.activation(h)
         # print(h.shape)
