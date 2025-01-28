@@ -101,3 +101,25 @@ class feat_nn(nn.Module):
         x = self.act(x)
         x = self.out(x)
         return x
+
+def cleanup_qm9_xyz(fname):
+    ind = open(fname).readlines()
+    nAts = int(ind[0])
+    # Extract SMILES strings
+    gdb_smi, relax_smi = ind[-2].split()[:2]
+    ind[1] = '\n'
+    ind = ind[:nAts + 2]
+    for i in range(2, nAts + 2):
+        l = ind[i]
+        l = l.split('\t')
+        l.pop(-1)
+        # Clean and ensure valid formatting
+        l = [x.strip().replace('*^', 'e') for x in l]
+        try:
+            # Attempt to convert to float to validate
+            l[1:] = [f"{float(x):.10f}" for x in l[1:]]
+        except ValueError as e:
+            raise ValueError(f"Error parsing line {i}: {l}, {e}")
+        ind[i] = '\t'.join(l) + '\n'
+    ind = ''.join(ind)
+    return ind, gdb_smi, relax_smi

@@ -1,17 +1,18 @@
 import os
-from tabnanny import check
 import numpy as np
-from sqlalchemy import all_
 import torch
 import dgl
 import math
-from rum.data import qm9,collate
+from rum.data import qm9,collate,qm9_xyz,qm9_graph
 from rum.utils import Normalizer
 from transformers import get_cosine_schedule_with_warmup
+
 from accelerate import Accelerator
 # from ogb.nodeproppred import DglNodePropPredDataset
 dgl.use_libxsmm(False)
 def get_graphs(args,debug=False):
+
+    # data = qm9
     if debug:
         train_set = qm9('small_train',args)
         valid_set = qm9('small_valid',args)
@@ -30,7 +31,7 @@ def run(args):
     # Get current date and time
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-    tmp_dir = f'./checkpoint/qm9/{args.label}/{timestamp}'
+    tmp_dir = f'/scratch/venkvis_root/venkvis/hongshuh/rum/checkpoint/qm9/{args.label}/{timestamp}'
     os.makedirs(tmp_dir,exist_ok=True)
     
     args_dict = vars(args)
@@ -57,15 +58,15 @@ def run(args):
         accelerator.print("Train label shape",train_label.shape)
     
     data_train = dgl.dataloading.GraphDataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,num_workers=32, collate_fn=collate
+        train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,num_workers=8, collate_fn=collate
     )
 
     data_valid = dgl.dataloading.GraphDataLoader(
-        valid_set, batch_size=2*args.batch_size,num_workers=32, collate_fn=collate
+        valid_set, batch_size=2*args.batch_size,num_workers=8, collate_fn=collate
     )
 
     data_test = dgl.dataloading.GraphDataLoader(
-        test_set, batch_size=2*args.batch_size,num_workers=32, collate_fn=collate
+        test_set, batch_size=2*args.batch_size,num_workers=8, collate_fn=collate
     )
 
     g, y ,walks,eids = next(iter(data_train))
