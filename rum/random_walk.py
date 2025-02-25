@@ -35,6 +35,7 @@ def uniform_random_walk_(g, num_samples, length, subsample=None):
     walks = walks.view(num_samples, num_nodes, length)
     eids = eids.view(num_samples, num_nodes, length-1)
     return walks, eids
+
 def uniform_random_walk(g, num_samples, length, subsample=None):
     """
     Random walk on a graph.
@@ -62,7 +63,8 @@ def uniform_random_walk(g, num_samples, length, subsample=None):
         num_nodes = subsample.size(0)
     g = g.to_cugraph()
     nodes = nodes.tolist()
-    walks, _, _ = cugraph.node2vec(g, nodes, max_depth=length)
+    ## DFS
+    walks, _, _ = cugraph.node2vec(g, nodes, max_depth=length, p=10.0, q=0.1)
     walks = from_dlpack(walks.to_dlpack())
     walks = walks.view(num_samples,num_nodes,length)
     src_nodes = walks[:, :, :-1].reshape(-1) # All source nodes
@@ -70,11 +72,10 @@ def uniform_random_walk(g, num_samples, length, subsample=None):
     edges_df = g.view_edge_list().reset_index()
     walks_df = cudf.DataFrame({'source': src_nodes, 'destination': dst_nodes})
     eids = walks_df.merge(edges_df, on=['source', 'destination'], how='left')['index'].values
-    # Query edge indices in batch
-    # print(eids)
     eids = eids.reshape(num_samples, num_nodes, length - 1)
     eids = torch.tensor(eids,dtype=torch.int32)
     return walks, eids
+
 def node2vec_random_walk(g, num_samples, length, subsample=None,mode='Mix'):
     """
     Bias Random walk on a graph.

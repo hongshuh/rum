@@ -14,13 +14,13 @@ def get_graphs(args,debug=False):
 
     # data = qm9
     if debug:
-        train_set = qm9('small_train',args)
-        valid_set = qm9('small_valid',args)
-        test_set = qm9('small_test',args)
+        train_set = qm9_graph('small_train',args)
+        valid_set = qm9_graph('small_valid',args)
+        test_set = qm9_graph('small_test',args)
     else:
-        train_set = qm9('train',args)
-        valid_set = qm9('valid',args)
-        test_set = qm9('test',args)
+        train_set = qm9_graph('train',args)
+        valid_set = qm9_graph('valid',args)
+        test_set = qm9_graph('test',args)
 
     return train_set, valid_set, test_set
 

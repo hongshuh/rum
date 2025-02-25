@@ -7,14 +7,14 @@ from .layers import RUMLayer, Consistency
 from .utils import feat_nn,gate_nn
 
 class Multi_Head_Attention(torch.nn.Module):
-    def __init__(self,hidden,heads,gate,feat):
+    def __init__(self,hidden,heads,gate,feat,dropout=0.1):
         super().__init__()
         assert hidden % heads == 0, "Input dimension must be divisible by the number of heads."
         self.heads = heads
         self.hidden = hidden
         self.gate = gate
         self.feat = feat
-        self.attn_drop = torch.nn.Dropout(0.1)
+        self.attn_drop = torch.nn.Dropout(dropout)
     def forward(self,h):
         N,BN,D = h.shape # N: number of random walks, BN: batch size * number of nodes, D: hidden dimension
         f = self.feat(h)
@@ -116,7 +116,7 @@ class RUMGraphRegressionModel(RUMModel):
             torch.nn.Linear(self.hidden_features, self.out_features),
         )
         self.LayerNorm = torch.nn.LayerNorm(self.hidden_features)
-        self.heads = 8
+        self.heads = 2
 
         ## Graph Attention Pooling
         self.attn_feat = feat_nn(self.hidden_features, self.hidden_features, self.hidden_features)

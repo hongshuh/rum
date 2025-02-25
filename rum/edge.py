@@ -75,3 +75,21 @@ class SmoothBesselBasis(nn.Module):
                 )
             )
         return torch.transpose(torch.stack(gn), 1, 0)
+
+class SwishLayer(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        bias=False,
+    ):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim, bias=bias)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(
+        self,
+        x,
+    ):
+        x = self.linear(x)
+        return x * self.sigmoid(x)

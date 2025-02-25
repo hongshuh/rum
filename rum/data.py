@@ -104,6 +104,9 @@ class qm9_graph(DGLDataset):
         id = self.df['mol_id'][idx].split('_')[-1]
         id = id.zfill(6)
         g = dgl.load_graphs(f'{self.graph_dir}/dsgdb9nsd_{id}.bin')[0][0]
+
+        ##Remove atom position
+        g.ndata['h0'] = g.ndata['h0'][:,:-3]
         y = np.array([self.df[l][idx] for l in self.label]).T
         y = torch.tensor(y).float()
         walks, eids = None,None

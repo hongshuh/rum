@@ -4,7 +4,7 @@ import torch
 import dgl
 from .random_walk import uniform_random_walk, uniqueness, node2vec_random_walk, uniform_random_walk_
 from .rnn import GRU
-from .edge import SmoothBesselBasis
+from .edge import SmoothBesselBasis, SwishLayer
 class RUMLayer(torch.nn.Module):
     def __init__(
             self,
@@ -29,10 +29,11 @@ class RUMLayer(torch.nn.Module):
         # self.fc = torch.nn.Linear(in_features + 2 * out_features + 1, out_features, bias=False)
         self.rnn = rnn(in_features + 2 * out_features + int(degrees), out_features, **kwargs)
         self.rnn_walk = rnn(2, out_features, bidirectional=True, **kwargs)
-
-        self.maxn = 0
+        self.maxn = 10
+        self.rbf = SmoothBesselBasis(5, self.maxn)
         if edge_features > 0:
-            self.fc_edge = torch.nn.Linear(edge_features+self.maxn, int(degrees) + in_features + 2 * out_features, bias=False)
+            # self.fc_edge = torch.nn.Linear(edge_features, int(degrees) + in_features + 2 * out_features, bias=False)
+            self.fc_edge = SwishLayer(edge_features+self.maxn, int(degrees) + in_features + 2 * out_features,bias=False)
         self.in_features = in_features
         self.out_features = out_features
         self.random_walk = random_walk
@@ -46,7 +47,6 @@ class RUMLayer(torch.nn.Module):
         self.activation = activation
         self.directed = directed
         self.degrees = degrees
-        self.rbf = SmoothBesselBasis(5, self.maxn)
 
     def forward(self, g, h, y0, e=None, subsample=None,walks=None,eids=None):
         """Forward pass.
@@ -109,10 +109,10 @@ class RUMLayer(torch.nn.Module):
         # h = self.activation(h)
         ##TODO better way to handle edge features
         if e is not None:
-            # e_l = g.edata['el']
-            # e_attr = self.rbf(e_l)
-            # e = torch.cat([e, e_attr], dim=-1)
-            # e = e.float()
+            e_l = g.edata['el']
+            e_attr = self.rbf(e_l)
+            e = torch.cat([e, e_attr], dim=-1)
+            e = e.float()
             _h = torch.empty(
                 *h.shape[:-2],
                 2 * h.shape[-2] - 1,
